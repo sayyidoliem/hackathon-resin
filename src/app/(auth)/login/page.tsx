@@ -14,6 +14,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import Image from "next/image";
+import { FcGoogle } from 'react-icons/fc';
 
 const schema = z.object({
   email: z.string().email("Format email tidak valid"),
@@ -64,14 +66,8 @@ export default function LoginPage() {
   return (
     <Card className="w-full max-w-sm shadow-md">
       <CardHeader className="pb-4">
-        <div className="flex items-center gap-2.5 mb-4">
-          <div className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center">
-            <Leaf className="w-5 h-5 text-primary-foreground" />
-          </div>
-          <div>
-            <p className="font-bold text-base text-foreground leading-none">ResinSep</p>
-            <p className="text-[10px] text-muted-foreground">TPS3R Surabaya</p>
-          </div>
+        <div className="flex items-center gap-2.5 mb-4 px-16">
+          <Image src="/logo-resinsep.png" height={362} width={1080} alt="Logo ResinSep" />
         </div>
         <CardTitle className="text-lg">Masuk ke akun</CardTitle>
         <CardDescription>Masukkan email dan password untuk melanjutkan</CardDescription>
@@ -130,7 +126,7 @@ export default function LoginPage() {
           onClick={handleGoogle}
           disabled={googleLoading}
         >
-          <Globe className="w-4 h-4" />
+          <FcGoogle className="w-4 h-4" />
           {googleLoading ? "Memproses..." : "Lanjut dengan Google"}
         </Button>
 
