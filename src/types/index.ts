@@ -64,7 +64,7 @@ export const STAGES_META = [
     medium: "Air (H2O)",
     density: "1.00 g/cm3",
     float: "PP, HDPE, LDPE",
-    sink: "PET, PVC, PS, ABS",
+    sink: "PET, PVC, ABS",
   },
   {
     label: "Tahap 2",
@@ -84,7 +84,7 @@ export const STAGES_META = [
     label: "Tahap 4",
     medium: "CaCl2 30% w/v",
     density: "1.12 g/cm3",
-    float: "PS, ABS",
+    float: "ABS",
     sink: "PET, PVC",
   },
   {

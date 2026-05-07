@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Plus, X } from "lucide-react";
+import { Check } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/auth-context";
 import { addCycle, getCycles, genCycleId } from "@/lib/firestore";
@@ -12,12 +12,10 @@ import {
   STAGES_META,
   PRICE_REF,
   type ResinGrade,
-  type Resin,
   type Stage,
 } from "@/types";
 import { fmtRp } from "@/lib/utils";
 import { TopBar } from "@/components/topbar";
-import { GradeBadge } from "@/components/grade-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,10 +29,32 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-interface OutputResin {
+// Derived resin type from stage data
+interface DerivedResin {
   type: string;
-  kg: string;
+  kg: number;
   grade: ResinGrade;
+  source: string; // human-readable source description
+}
+
+// Derive output resins automatically from stage data:
+// Tahap 2 sink → HDPE
+// Tahap 3 float → PP
+// Tahap 3 sink  → LDPE
+// Tahap 4 float → (PS/ABS tidak dimonetisasi, diabaikan)
+// Tahap 5 float → PET
+// Tahap 5 sink  → PVC
+function deriveResins(stages: Stage[]): Omit<DerivedResin, "grade">[] {
+  const [, s2, s3, , s5] = stages;
+  const results: Omit<DerivedResin, "grade">[] = [];
+
+  if (s2.sinkKg > 0) results.push({ type: "HDPE", kg: s2.sinkKg, source: "Tahap 2 – tenggelam" });
+  if (s3.floatKg > 0) results.push({ type: "PP", kg: s3.floatKg, source: "Tahap 3 – apung" });
+  if (s3.sinkKg > 0) results.push({ type: "LDPE", kg: s3.sinkKg, source: "Tahap 3 – tenggelam" });
+  if (s5.floatKg > 0) results.push({ type: "PET", kg: s5.floatKg, source: "Tahap 5 – apung" });
+  if (s5.sinkKg > 0) results.push({ type: "PVC", kg: s5.sinkKg, source: "Tahap 5 – tenggelam" });
+
+  return results;
 }
 
 const STEP_LABELS = ["Input dan Sumber", "Monitor Proses", "Output dan Grading"];
@@ -82,6 +102,12 @@ function StepIndicator({ current }: { current: number }) {
   );
 }
 
+const GRADE_STYLES: Record<ResinGrade, { bg: string; color: string }> = {
+  A: { bg: "#D4F0E0", color: "#1A6B3A" },
+  B: { bg: "#FFF0D4", color: "#9A6000" },
+  C: { bg: "#FCE4E4", color: "#B33A3A" },
+};
+
 export default function NewCyclePage() {
   const { user } = useAuth();
   const router = useRouter();
@@ -101,9 +127,8 @@ export default function NewCyclePage() {
     STAGES_META.map(() => ({ dur: 0, floatKg: 0, sinkKg: 0 }))
   );
 
-  const [outputResins, setOutputResins] = useState<OutputResin[]>([
-    { type: "PET", kg: "", grade: "A" },
-  ]);
+  // Grade per derived resin type (keyed by type string)
+  const [resinGrades, setResinGrades] = useState<Record<string, ResinGrade>>({});
 
   const [saving, setSaving] = useState(false);
 
@@ -120,25 +145,30 @@ export default function NewCyclePage() {
     });
   };
 
-  const updateOutputResin = (i: number, patch: Partial<OutputResin>) => {
-    setOutputResins((prev) => {
-      const next = [...prev];
-      next[i] = { ...next[i], ...patch };
-      return next;
-    });
-  };
+  const derivedResins = useMemo(() => deriveResins(stageData), [stageData]);
 
-  const totalOutput = outputResins.reduce((s, r) => s + (parseFloat(r.kg) || 0), 0);
-  const recRate = inputKg ? ((totalOutput / parseFloat(inputKg)) * 100).toFixed(1) : "0.0";
+  const outputResins: DerivedResin[] = derivedResins.map((r) => ({
+    ...r,
+    grade: resinGrades[r.type] ?? "A",
+  }));
+
+  const totalOutput = outputResins.reduce((s, r) => s + r.kg, 0);
+
+  const monetisedKg = outputResins.reduce(
+    (s, r) => s + (PRICE_REF[r.type] ? r.kg : 0),
+    0
+  );
+  const monetisedPct = totalOutput > 0 ? ((monetisedKg / totalOutput) * 100).toFixed(1) : "0.0";
+
   const estRev = outputResins.reduce(
-    (s, r) => s + (parseFloat(r.kg) || 0) * (PRICE_REF[r.type] || 0),
+    (s, r) => s + r.kg * (PRICE_REF[r.type] || 0),
     0
   );
 
   const handleSave = async () => {
     if (!user) return;
-    if (outputResins.some((r) => !r.kg)) {
-      toast.error("Lengkapi berat semua resin output");
+    if (outputResins.length === 0) {
+      toast.error("Belum ada output resin yang terdeteksi. Isi data tahap terlebih dahulu.");
       return;
     }
     setSaving(true);
@@ -146,7 +176,7 @@ export default function NewCyclePage() {
       const existingCycles = await getCycles(user.uid);
       const id = genCycleId(existingCycles.map((c) => c.id));
       const duration = stageData.reduce((s, d) => s + d.dur, 0);
-      const outputKg = outputResins.reduce((s, r) => s + (parseFloat(r.kg) || 0), 0);
+      const outputKg = totalOutput;
       const ts = new Date().toLocaleString("id-ID", {
         day: "2-digit",
         month: "long",
@@ -165,7 +195,7 @@ export default function NewCyclePage() {
         notes,
         resins: outputResins.map((r) => ({
           type: r.type,
-          kg: parseFloat(r.kg) || 0,
+          kg: r.kg,
           grade: r.grade,
         })),
         stages: stageData,
@@ -338,93 +368,76 @@ export default function NewCyclePage() {
         <div className="grid grid-cols-[1fr_260px] gap-4">
           <Card>
             <CardHeader>
-              <CardTitle>Output per Resin</CardTitle>
+              <CardTitle>Output Resin</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {outputResins.map((r, i) => (
-                <div key={i} className="grid grid-cols-[1fr_1fr_auto_auto] gap-2.5 items-end">
-                  <div className="space-y-1.5">
-                    <Label>Jenis Resin</Label>
-                    <Select
-                      value={r.type}
-                      onValueChange={(v) => updateOutputResin(i, { type: v })}
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {RESIN_TYPES.map((t) => (
-                          <SelectItem key={t} value={t}>{t}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+              {outputResins.length === 0 ? (
+                <p className="text-sm text-muted-foreground py-2">
+                  Tidak ada output terdeteksi. Kembali ke Tahap 2 dan isi berat fraksi apung/tenggelam.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {/* Header row */}
+                  <div className="grid grid-cols-[1fr_100px_120px_140px] gap-3 px-1">
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Jenis Resin</p>
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Berat (kg)</p>
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Grade</p>
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Sumber Tahap</p>
                   </div>
 
-                  <div className="space-y-1.5">
-                    <Label>Berat (kg)</Label>
-                    <Input
-                      type="number"
-                      value={r.kg}
-                      onChange={(e) => updateOutputResin(i, { kg: e.target.value })}
-                      placeholder="0"
-                    />
-                  </div>
+                  {outputResins.map((r, i) => {
+                    const grade = r.grade;
+                    return (
+                      <div
+                        key={i}
+                        className="grid grid-cols-[1fr_100px_120px_140px] gap-3 items-center py-2.5 px-3 rounded-lg bg-accent/50 border border-border"
+                      >
+                        {/* Resin type badge */}
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-sm">{r.type}</span>
+                        </div>
 
-                  <div className="space-y-1.5">
-                    <Label>Grade</Label>
-                    <div className="flex gap-1">
-                      {(["A", "B", "C"] as ResinGrade[]).map((g) => {
-                        const styles: Record<ResinGrade, { bg: string; color: string }> = {
-                          A: { bg: "#D4F0E0", color: "#1A6B3A" },
-                          B: { bg: "#FFF0D4", color: "#9A6000" },
-                          C: { bg: "#FCE4E4", color: "#B33A3A" },
-                        };
-                        const s = styles[g];
-                        const active = r.grade === g;
-                        return (
-                          <button
-                            key={g}
-                            type="button"
-                            onClick={() => updateOutputResin(i, { grade: g })}
-                            className="h-9 w-9 rounded-md text-xs font-bold border transition-all"
-                            style={
-                              active
-                                ? { background: s.bg, color: s.color, borderColor: s.color }
-                                : {}
-                            }
-                          >
-                            {g}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                        {/* Weight - read-only from stage data */}
+                        <p className="font-mono text-sm font-bold text-foreground">{r.kg} kg</p>
 
-                  <button
-                    type="button"
-                    onClick={() => setOutputResins((p) => p.filter((_, j) => j !== i))}
-                    className="h-9 w-9 flex items-center justify-center rounded-md text-destructive hover:bg-destructive/10 transition-colors"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
+                        {/* Grade selector */}
+                        <div className="flex gap-1">
+                          {(["A", "B", "C"] as ResinGrade[]).map((g) => {
+                            const s = GRADE_STYLES[g];
+                            const active = grade === g;
+                            return (
+                              <button
+                                key={g}
+                                type="button"
+                                onClick={() =>
+                                  setResinGrades((prev) => ({ ...prev, [r.type]: g }))
+                                }
+                                className="h-8 w-8 rounded-md text-xs font-bold border transition-all"
+                                style={
+                                  active
+                                    ? { background: s.bg, color: s.color, borderColor: s.color }
+                                    : {}
+                                }
+                              >
+                                {g}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {/* Source label */}
+                        <p className="text-[10px] text-muted-foreground">{r.source}</p>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
+              )}
 
-              <button
-                type="button"
-                onClick={() =>
-                  setOutputResins((p) => [...p, { type: "PP", kg: "", grade: "A" }])
-                }
-                className="flex items-center gap-1.5 text-sm text-primary font-medium hover:underline"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Tambah Resin
-              </button>
-
-              <div className="mt-2 p-4 bg-accent rounded-lg grid grid-cols-3 gap-4">
+              {/* Summary */}
+              <div className="mt-3 p-4 bg-accent rounded-lg grid grid-cols-3 gap-4">
                 {[
                   ["Total Output", `${totalOutput} kg`],
-                  ["Recovery Rate", `${recRate}%`],
+                  ["% Dimonetisasi", `${monetisedPct}%`],
                   ["Est. Pendapatan", fmtRp(estRev)],
                 ].map(([k, v]) => (
                   <div key={k}>
@@ -433,9 +446,12 @@ export default function NewCyclePage() {
                   </div>
                 ))}
               </div>
+              <p className="text-[10px] text-muted-foreground -mt-1">
+                * Harga akan disesuaikan dengan harga pasaran yang dapat diupdate.
+              </p>
 
               <div className="pt-2">
-                <Button onClick={handleSave} disabled={saving}>
+                <Button onClick={handleSave} disabled={saving || outputResins.length === 0}>
                   {saving ? "Menyimpan..." : "Simpan dan Buat Laporan"}
                 </Button>
               </div>
