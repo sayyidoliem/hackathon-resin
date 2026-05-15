@@ -9,6 +9,8 @@ import {
   Package,
   Leaf,
   LogOut,
+  LucideSoapDispenserDroplet,
+  GaugeIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/auth-context";
@@ -21,6 +23,7 @@ const NAV = [
   { href: "/new-cycle", icon: PlusCircle, label: "Siklus Baru" },
   { href: "/cycles", icon: ClipboardList, label: "Riwayat Siklus" },
   { href: "/inventory", icon: Package, label: "Inventori Resin" },
+  { href: "/performance", icon: GaugeIcon, label: "Analisis Performa" },
 ];
 
 export function Sidebar() {
