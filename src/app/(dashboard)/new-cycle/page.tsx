@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Check } from "lucide-react";
+import { Check, ChevronLeft, FileText } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/auth-context";
-import { addCycle, getCycles, genCycleId } from "@/lib/firestore";
+import { addCycle, getCycles, genCycleId, saveDraft, getDraft, deleteDraft } from "@/lib/firestore";
 import {
   SUPPLIERS,
   RESIN_TYPES,
@@ -29,19 +29,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-// Derived resin type from stage data
 interface DerivedResin {
   type: string;
   kg: number;
   grade: ResinGrade;
-  source: string; // human-readable source description
+  source: string;
 }
 
 // Derive output resins automatically from stage data:
 // Tahap 2 sink → HDPE
 // Tahap 3 float → PP
 // Tahap 3 sink  → LDPE
-// Tahap 4 float → (PS/ABS tidak dimonetisasi, diabaikan)
+// Tahap 4 float → (ABS tidak dimonetisasi, diabaikan)
 // Tahap 5 float → PET
 // Tahap 5 sink  → PVC
 function deriveResins(stages: Stage[]): Omit<DerivedResin, "grade">[] {
@@ -58,6 +57,29 @@ function deriveResins(stages: Stage[]): Omit<DerivedResin, "grade">[] {
 }
 
 const STEP_LABELS = ["Input dan Sumber", "Monitor Proses", "Output dan Grading"];
+const LS_KEY = "new-cycle-draft";
+
+interface FormState {
+  step: number;
+  supplier: string;
+  inputKg: string;
+  selectedResins: string[];
+  notes: string;
+  stageData: Stage[];
+  resinGrades: Record<string, ResinGrade>;
+}
+
+function getDefaultState(): FormState {
+  return {
+    step: 1,
+    supplier: "",
+    inputKg: "",
+    selectedResins: [],
+    notes: "",
+    stageData: STAGES_META.map(() => ({ dur: 0, floatKg: 0, sinkKg: 0 })),
+    resinGrades: {},
+  };
+}
 
 function StepIndicator({ current }: { current: number }) {
   return (
@@ -111,8 +133,8 @@ const GRADE_STYLES: Record<ResinGrade, { bg: string; color: string }> = {
 export default function NewCyclePage() {
   const { user } = useAuth();
   const router = useRouter();
-  const [step, setStep] = useState(1);
 
+  const [step, setStep] = useState(1);
   const [supplier, setSupplier] = useState("");
   const [inputKg, setInputKg] = useState("");
   const [selectedResins, setSelectedResins] = useState<string[]>([]);
@@ -122,15 +144,48 @@ export default function NewCyclePage() {
     const key = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
     return `RSP-${key}-001`;
   });
-
   const [stageData, setStageData] = useState<Stage[]>(
     STAGES_META.map(() => ({ dur: 0, floatKg: 0, sinkKg: 0 }))
   );
-
-  // Grade per derived resin type (keyed by type string)
   const [resinGrades, setResinGrades] = useState<Record<string, ResinGrade>>({});
-
   const [saving, setSaving] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [hasDraftBanner, setHasDraftBanner] = useState(false);
+
+  // Load from localStorage on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) {
+        const saved: FormState = JSON.parse(raw);
+        setStep(saved.step ?? 1);
+        setSupplier(saved.supplier ?? "");
+        setInputKg(saved.inputKg ?? "");
+        setSelectedResins(saved.selectedResins ?? []);
+        setNotes(saved.notes ?? "");
+        setStageData(saved.stageData ?? STAGES_META.map(() => ({ dur: 0, floatKg: 0, sinkKg: 0 })));
+        setResinGrades(saved.resinGrades ?? {});
+        setHasDraftBanner(true);
+      }
+    } catch {
+      // ignore malformed localStorage
+    }
+  }, []);
+
+  // Persist to localStorage on every change
+  const currentState: FormState = {
+    step, supplier, inputKg, selectedResins, notes, stageData, resinGrades,
+  };
+
+  useEffect(() => {
+    // Don't save empty state
+    if (!supplier && !inputKg && stageData.every((s) => s.dur === 0 && s.floatKg === 0 && s.sinkKg === 0)) return;
+    localStorage.setItem(LS_KEY, JSON.stringify(currentState));
+  });
+
+  const clearLocalDraft = useCallback(() => {
+    localStorage.removeItem(LS_KEY);
+  }, []);
 
   const toggleResin = (r: string) =>
     setSelectedResins((prev) =>
@@ -153,54 +208,52 @@ export default function NewCyclePage() {
   }));
 
   const totalOutput = outputResins.reduce((s, r) => s + r.kg, 0);
-
-  const monetisedKg = outputResins.reduce(
-    (s, r) => s + (PRICE_REF[r.type] ? r.kg : 0),
-    0
-  );
+  const monetisedKg = outputResins.reduce((s, r) => s + (PRICE_REF[r.type] ? r.kg : 0), 0);
   const monetisedPct = totalOutput > 0 ? ((monetisedKg / totalOutput) * 100).toFixed(1) : "0.0";
+  const estRev = outputResins.reduce((s, r) => s + r.kg * (PRICE_REF[r.type] || 0), 0);
 
-  const estRev = outputResins.reduce(
-    (s, r) => s + r.kg * (PRICE_REF[r.type] || 0),
-    0
-  );
+  const buildCycleData = () => ({
+    id: cycleId,
+    ts: new Date().toLocaleString("id-ID", {
+      day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit",
+    }),
+    supplier,
+    inputKg: parseFloat(inputKg),
+    outputKg: totalOutput,
+    duration: stageData.reduce((s, d) => s + d.dur, 0),
+    notes,
+    resins: outputResins.map((r) => ({ type: r.type, kg: r.kg, grade: r.grade })),
+    stages: stageData,
+  });
+
+  const handleSaveDraft = async () => {
+    if (!user) return;
+    setSavingDraft(true);
+    try {
+      await saveDraft(user.uid, { ...buildCycleData(), isDraft: true });
+      clearLocalDraft();
+      toast.success("Draft disimpan");
+    } catch {
+      toast.error("Gagal menyimpan draft");
+    } finally {
+      setSavingDraft(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!user) return;
     if (outputResins.length === 0) {
-      toast.error("Belum ada output resin yang terdeteksi. Isi data tahap terlebih dahulu.");
+      toast.error("Belum ada output resin. Isi data tahap terlebih dahulu.");
       return;
     }
     setSaving(true);
     try {
       const existingCycles = await getCycles(user.uid);
       const id = genCycleId(existingCycles.map((c) => c.id));
-      const duration = stageData.reduce((s, d) => s + d.dur, 0);
-      const outputKg = totalOutput;
-      const ts = new Date().toLocaleString("id-ID", {
-        day: "2-digit",
-        month: "long",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-
-      await addCycle(user.uid, {
-        id,
-        ts,
-        supplier,
-        inputKg: parseFloat(inputKg),
-        outputKg,
-        duration,
-        notes,
-        resins: outputResins.map((r) => ({
-          type: r.type,
-          kg: r.kg,
-          grade: r.grade,
-        })),
-        stages: stageData,
-      });
-
+      await addCycle(user.uid, { ...buildCycleData(), id });
+      // Delete Firestore draft if it exists and clear localStorage
+      try { await deleteDraft(user.uid); } catch { /* no draft to delete */ }
+      clearLocalDraft();
       toast.success("Siklus berhasil disimpan");
       router.push("/cycles");
     } catch {
@@ -210,9 +263,39 @@ export default function NewCyclePage() {
     }
   };
 
+  const handleDiscardDraft = () => {
+    clearLocalDraft();
+    const defaults = getDefaultState();
+    setStep(defaults.step);
+    setSupplier(defaults.supplier);
+    setInputKg(defaults.inputKg);
+    setSelectedResins(defaults.selectedResins);
+    setNotes(defaults.notes);
+    setStageData(defaults.stageData);
+    setResinGrades(defaults.resinGrades);
+    setHasDraftBanner(false);
+  };
+
   return (
     <div>
       <TopBar title="Siklus Baru" sub="Log batch separasi resin baru" />
+
+      {hasDraftBanner && (
+        <div className="mb-5 flex items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <div className="flex items-center gap-2">
+            <FileText className="w-4 h-4 shrink-0" />
+            <span>Ditemukan data yang belum selesai. Melanjutkan dari sesi sebelumnya.</span>
+          </div>
+          <button
+            type="button"
+            onClick={handleDiscardDraft}
+            className="shrink-0 text-xs underline underline-offset-2 hover:text-amber-900"
+          >
+            Buang & mulai baru
+          </button>
+        </div>
+      )}
+
       <StepIndicator current={step} />
 
       {step === 1 && (
@@ -281,17 +364,27 @@ export default function NewCyclePage() {
                 />
               </div>
 
-              <Button
-                onClick={() => {
-                  if (!supplier || !inputKg) {
-                    toast.error("Lengkapi sumber dan berat input");
-                    return;
-                  }
-                  setStep(2);
-                }}
-              >
-                Mulai Siklus
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  onClick={() => {
+                    if (!supplier || !inputKg) {
+                      toast.error("Lengkapi sumber dan berat input");
+                      return;
+                    }
+                    setHasDraftBanner(false);
+                    setStep(2);
+                  }}
+                >
+                  Mulai Siklus
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleSaveDraft}
+                  disabled={savingDraft || (!supplier && !inputKg)}
+                >
+                  {savingDraft ? "Menyimpan..." : "Simpan Draft"}
+                </Button>
+              </div>
             </CardContent>
           </Card>
 
@@ -360,7 +453,20 @@ export default function NewCyclePage() {
               </Card>
             ))}
           </div>
-          <Button onClick={() => setStep(3)}>Selesaikan Proses - Input Output</Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setStep(1)}>
+              <ChevronLeft className="w-4 h-4 mr-1" />
+              Kembali
+            </Button>
+            <Button onClick={() => setStep(3)}>Selesaikan Proses - Input Output</Button>
+            <Button
+              variant="outline"
+              onClick={handleSaveDraft}
+              disabled={savingDraft}
+            >
+              {savingDraft ? "Menyimpan..." : "Simpan Draft"}
+            </Button>
+          </div>
         </div>
       )}
 
@@ -377,7 +483,6 @@ export default function NewCyclePage() {
                 </p>
               ) : (
                 <div className="space-y-2">
-                  {/* Header row */}
                   <div className="grid grid-cols-[1fr_100px_120px_140px] gap-3 px-1">
                     <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Jenis Resin</p>
                     <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Berat (kg)</p>
@@ -392,15 +497,10 @@ export default function NewCyclePage() {
                         key={i}
                         className="grid grid-cols-[1fr_100px_120px_140px] gap-3 items-center py-2.5 px-3 rounded-lg bg-accent/50 border border-border"
                       >
-                        {/* Resin type badge */}
                         <div className="flex items-center gap-2">
                           <span className="font-semibold text-sm">{r.type}</span>
                         </div>
-
-                        {/* Weight - read-only from stage data */}
                         <p className="font-mono text-sm font-bold text-foreground">{r.kg} kg</p>
-
-                        {/* Grade selector */}
                         <div className="flex gap-1">
                           {(["A", "B", "C"] as ResinGrade[]).map((g) => {
                             const s = GRADE_STYLES[g];
@@ -424,8 +524,6 @@ export default function NewCyclePage() {
                             );
                           })}
                         </div>
-
-                        {/* Source label */}
                         <p className="text-[10px] text-muted-foreground">{r.source}</p>
                       </div>
                     );
@@ -433,7 +531,6 @@ export default function NewCyclePage() {
                 </div>
               )}
 
-              {/* Summary */}
               <div className="mt-3 p-4 bg-accent rounded-lg grid grid-cols-3 gap-4">
                 {[
                   ["Total Output", `${totalOutput} kg`],
@@ -450,9 +547,20 @@ export default function NewCyclePage() {
                 * Harga akan disesuaikan dengan harga pasaran yang dapat diupdate.
               </p>
 
-              <div className="pt-2">
+              <div className="flex gap-2 pt-2">
+                <Button variant="outline" onClick={() => setStep(2)}>
+                  <ChevronLeft className="w-4 h-4 mr-1" />
+                  Kembali
+                </Button>
                 <Button onClick={handleSave} disabled={saving || outputResins.length === 0}>
                   {saving ? "Menyimpan..." : "Simpan dan Buat Laporan"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleSaveDraft}
+                  disabled={savingDraft}
+                >
+                  {savingDraft ? "Menyimpan..." : "Simpan Draft"}
                 </Button>
               </div>
             </CardContent>
