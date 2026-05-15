@@ -25,6 +25,7 @@ export interface Cycle {
   stages: Stage[];
   userId: string;
   createdAt?: number;
+  isDraft?: boolean;
 }
 
 export const RESIN_COLORS: Record<string, string> = {
